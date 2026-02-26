@@ -89,7 +89,7 @@ jobs:
             --requires="libssl3t64,libpam0g,liblz4-1,liblzma5,libzstd1,libbz2-1.0,zlib1g,libsqlite3-0,libcap2,libwrap0,libsystemd0,libexttextcat-2.0-0,libsodium23,libicu74,libstemmer0d,libunwind8,libcrypt1,adduser,openssl" \
             --pakdir=.. \
             --install=no \
-            --fstrans=yes \
+            --fstrans=no \
             make install
 
       - name: Repack .deb for reprepro compatibility
