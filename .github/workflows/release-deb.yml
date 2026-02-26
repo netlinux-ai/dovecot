@@ -64,7 +64,7 @@ jobs:
             --prefix=/usr \
             --sysconfdir=/etc \
             --localstatedir=/var \
-            --libexecdir=/usr/lib \
+            --libexecdir=/usr/lib/dovecot \
             --runstatedir=/run \
             --with-ssl=openssl \
             --with-pam \
