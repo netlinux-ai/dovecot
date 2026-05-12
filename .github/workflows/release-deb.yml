@@ -1,178 +1,28 @@
-name: Build .deb package (dual-suite)
+name: Trigger dev build
+# All build/test/publish happens on dev (the netlinux nightly host).
+# This GHA workflow is a thin trigger: on every push, sign and POST the
+# commit info to the apt-server webhook, which SSHes to dev and starts
+# a single-repo build for both bookworm and resolute suites.
 
 on:
   push:
-    branches: [main]
-
-permissions:
-  contents: write
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: bookworm
-            container: debian:bookworm
-          - target: resolute
-            container: ubuntu:26.04
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ matrix.container }}
-
+  trigger:
+    runs-on: ubuntu-latest
     steps:
-      - name: Bootstrap container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates curl git xz-utils zstd \
-            build-essential dpkg-dev sudo
-
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y \
-            build-essential \
-            libssl-dev \
-            libpam0g-dev \
-            liblz4-dev \
-            liblzma-dev \
-            libzstd-dev \
-            libbz2-dev \
-            zlib1g-dev \
-            libsqlite3-dev \
-            libcap-dev \
-            libwrap0-dev \
-            libsystemd-dev \
-            libexttextcat-dev \
-            libsodium-dev \
-            libicu-dev \
-            libstemmer-dev \
-            libunwind-dev \
-            libtirpc-dev \
-            pkg-config \
-            checkinstall
-
-
-      - name: Determine version
-        id: version
-        run: |
-          UPSTREAM_VER="2.3.21.1"
-          rev=${{ github.run_number }}
-          echo "upstream=${UPSTREAM_VER}" >> "$GITHUB_OUTPUT"
-          echo "version=${UPSTREAM_VER}-${rev}netlinux1~${{ matrix.target }}1" >> "$GITHUB_OUTPUT"
-          echo "tag=v${UPSTREAM_VER}-${rev}netlinux1~${{ matrix.target }}1" >> "$GITHUB_OUTPUT"
-
-
-      - name: Download and extract source
-        run: |
-          curl -sL -o dovecot.tar.gz \
-            "https://dovecot.org/releases/2.3/dovecot-${{ steps.version.outputs.upstream }}.tar.gz"
-          tar xzf dovecot.tar.gz
-          mv dovecot-${{ steps.version.outputs.upstream }} dovecot-src
-
-
-      - name: Build
-        run: |
-          cd dovecot-src
-          CPPFLAGS="-I/usr/include/tirpc" \
-          LDFLAGS="-ltirpc" \
-          ./configure \
-            --prefix=/usr \
-            --sysconfdir=/etc \
-            --localstatedir=/var \
-            --libexecdir=/usr/lib/dovecot \
-            --runstatedir=/run \
-            --with-ssl=openssl \
-            --with-pam \
-            --with-sqlite \
-            --with-icu \
-            --with-stemmer \
-            --with-sodium \
-            --with-systemd \
-            --with-lz4 \
-            --with-zstd \
-            --with-bzlib \
-            --disable-static
-          make -j$(nproc)
-
-
-      - name: Package with checkinstall
-        run: |
-          cd dovecot-src
-          checkinstall --default \
-            --pkgname=dovecot \
-            --pkgversion="${{ steps.version.outputs.version }}" \
-            --maintainer="graham@netlinux.co.uk" \
-            --requires="libssl3t64,libpam0g,liblz4-1,liblzma5,libzstd1,libbz2-1.0,zlib1g,libsqlite3-0,libcap2,libwrap0,libsystemd0,libexttextcat-2.0-0,libsodium23,libicu74,libstemmer0d,libunwind8,libcrypt1,adduser,openssl" \
-            --pakdir=.. \
-            --install=no \
-            --fstrans=no \
-            make install
-
-
-      - name: Repack .deb for reprepro compatibility
-        run: |
-          DEB=$(ls dovecot_*.deb)
-          chmod 666 "$DEB"
-          mkdir repack && cd repack
-          ar x "../$DEB"
-          for f in *.zst; do
-            [ -f "$f" ] || continue
-            zstd -d "$f"
-            xz "${f%.zst}"
-            rm "$f"
-          done
-          rm "../$DEB"
-          ar rcs "../$DEB" debian-binary control.tar.xz data.tar.xz
-
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb-${{ matrix.target }}
-          path: |
-            **/*.deb
-          if-no-files-found: error
-
-  release:
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Compute tag
-        id: tag
-        run: echo "tag=v${{ github.run_number }}-dualsuite" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: Build ${{ github.run_number }} (bookworm + resolute)
-          body: |
-            Dual-suite build from commit ${{ github.sha }}.
-            Both ~bookworm1 and ~resolute1 .debs are attached.
-          files: artifacts/**/*.deb
-          fail_on_unmatched_files: true
+      - name: Notify dev build pipeline
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Notify package repository
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
-          sleep 5
-          PAYLOAD='{"repo":"netlinux-ai/dovecot","tag":"${{ steps.tag.outputs.tag }}"}'
-          SIGNATURE=$(echo -n "$PAYLOAD" \
-            | openssl dgst -sha256 -hmac "${{ secrets.WEBHOOK_SECRET }}" -binary \
-            | xxd -p -c 256)
-          curl -sf -X POST \
+          PAYLOAD=$(printf '{"repo":"%s","sha":"%s","ref":"%s"}' "$REPO" "$SHA" "$REF")
+          SIGNATURE=$(printf %s "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -binary | xxd -p -c 256)
+          echo "Dispatching build for $REPO @ ${SHA:0:8} ($REF)"
+          curl -sSf -X POST \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Signature: sha256=${SIGNATURE}" \
             -d "$PAYLOAD" \
-            https://packages.netlinux.co.uk/webhook/update-repo
+            https://packages.netlinux.co.uk/webhook/build
